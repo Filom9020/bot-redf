@@ -72,7 +72,7 @@ logger.addHandler(handler)
 for name in ['telegram', 'httpx', 'httpcore', 'telegram.ext']:
     logging.getLogger(name).setLevel(logging.WARNING)
 
-BOT_TOKEN = "7247634589:AAGkrlm-4hC7GYlGQLnoh7ZwxLaXsX_qe2I"
+BOT_TOKEN = "7247634589:AAEAdgyFjm-nJB3whg2jJqViIssieBipH_o"
 ADMIN_ID = 5245214800
 API_BASE = "https://liaobots.work"
 
