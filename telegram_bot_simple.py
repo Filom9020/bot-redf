@@ -578,30 +578,27 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Эта команда только для админа.")
         return
     
-    total = len(all_users)
-    total_interactions = sum(u.get("n", 0) for u in all_users.values())
+    manager = get_manager()
+    stats = manager.get_stats()
+    users = manager.users
     
-    now = int(time.time())
-    today = now - 86400
-    week = now - 604800
-    
-    today_new = sum(1 for u in all_users.values() if u.get("t", 0) >= today)
-    week_new = sum(1 for u in all_users.values() if u.get("t", 0) >= week)
-    
-    recent = sorted(all_users.items(), key=lambda x: x[1].get("t", 0), reverse=True)[:5]
-    recent_list = ""
-    for uid, u in recent:
-        date_str = time.strftime('%d.%m %H:%M', time.localtime(u.get('t', 0)))
-        recent_list += f"\n  {uid} ({date_str})"
+    total = stats['users_assigned']
+    accounts = stats['total_accounts']
+    active = stats['accounts_with_quota']
+    premium = stats['total_premium_quota']
     
     text = (
-        f"<b>Статистика</b>\n\n"
-        f"<b>Всего:</b> {total}\n"
-        f"<b>Новых за сутки:</b> {today_new}\n"
-        f"<b>Новых за неделю:</b> {week_new}\n"
-        f"<b>Взаимодействий:</b> {total_interactions}\n\n"
-        f"<b>Последние:</b>{recent_list}"
+        f"<b>📊 Статистика</b>\n\n"
+        f"<b>👥 Юзеров:</b> {total}\n"
+        f"<b>🔑 Аккаунтов:</b> {accounts} (активных: {active})\n"
+        f"<b>💎 Premium квота:</b> {premium}\n\n"
+        f"<b>Юзеры:</b>\n"
     )
+    
+    for uid, data in list(users.items())[:10]:
+        res = data.get('resolution', '1k')
+        boost = '🚀' if data.get('boost') else ''
+        text += f"  {uid}: {res} {boost}\n"
     
     await update.message.reply_text(text, parse_mode='HTML')
 
