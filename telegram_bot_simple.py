@@ -473,8 +473,8 @@ async def generate(prompt: str, aspect: str, user_id: int, image_data: bytes = N
             manager.update_account_quota(email, 0)  # This triggers removal + auto-create
             return None, "Аккаунт исчерпан, переключаюсь... Попробуйте ещё раз!"
         
-        # Generate (Text to Image or Image to Image)
-        image_url = await notegpt_generate(session, prompt, aspect, resolution, image_data=image_data)
+        # Generate (Text to Image only)
+        image_url = await notegpt_generate(session, prompt, aspect, resolution)
         
         if image_url == "server_busy":
             logger.warning(f"[User {user_id}] Server busy")
