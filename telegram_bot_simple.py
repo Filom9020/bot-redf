@@ -13,7 +13,7 @@ from telegram.request import HTTPXRequest
 import aiohttp
 from PIL import Image
 
-def compress_for_preview(image_data: bytes, max_size_mb: float = 9.0) -> bytes:
+def _compress_for_preview_sync(image_data: bytes, max_size_mb: float = 9.0) -> bytes:
     img = Image.open(io.BytesIO(image_data))
     max_dim = 2000
     if max(img.size) > max_dim:
@@ -26,7 +26,11 @@ def compress_for_preview(image_data: bytes, max_size_mb: float = 9.0) -> bytes:
     img.save(output, format='JPEG', quality=85, optimize=True)
     return output.getvalue()
 
-def detect_aspect_ratio(image_data: bytes) -> str:
+async def compress_for_preview(image_data: bytes, max_size_mb: float = 9.0) -> bytes:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _compress_for_preview_sync, image_data, max_size_mb)
+
+def _detect_aspect_ratio_sync(image_data: bytes) -> str:
     """
     Detect image aspect ratio and return closest supported format.
     Supported: 1:1, 16:9, 9:16, 4:3, 3:4, 21:9
@@ -48,6 +52,10 @@ def detect_aspect_ratio(image_data: bytes) -> str:
     # Find closest match
     closest = min(formats.items(), key=lambda x: abs(x[1] - ratio))
     return closest[0]
+
+async def detect_aspect_ratio(image_data: bytes) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _detect_aspect_ratio_sync, image_data)
 
 # Цвета для консоли
 class Colors:
@@ -148,9 +156,23 @@ def set_user_boost(user_id: int, value: bool):
     from account_manager import get_manager
     get_manager().set_user_boost(user_id, value)
 
+def get_user_aspect_ratio(user_id: int) -> str:
+    from account_manager import get_manager
+    return get_manager().get_user_aspect_ratio(user_id)
+
+def set_user_aspect_ratio(user_id: int, value: str):
+    from account_manager import get_manager
+    get_manager().set_user_aspect_ratio(user_id, value)
+
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        [["Создать картинку"], ["Разрешение", "Improve Prompt"], ["Помощь"]],
+        [["Создать картинку"], ["Настройки", "Improve Prompt"], ["Помощь"]],
+        resize_keyboard=True
+    )
+
+def settings_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [["Формат", "Разрешение"], ["Назад"]],
         resize_keyboard=True
     )
 
@@ -165,21 +187,22 @@ def resolution_keyboard(current: str) -> ReplyKeyboardMarkup:
         one_time_keyboard=True
     )
 
-def format_keyboard() -> ReplyKeyboardMarkup:
+def format_keyboard(current: str = "1:1") -> ReplyKeyboardMarkup:
+    # Helper to mark current selection
+    def fmt_btn(txt):
+        return f"[x] {txt}" if txt == current else txt
+
     return ReplyKeyboardMarkup(
-        [["1:1", "16:9"], ["9:16", "4:3"], ["3:4", "21:9"], ["Назад"]],
-        resize_keyboard=True,
-        one_time_keyboard=True
+        [
+            [fmt_btn("1:1"), fmt_btn("16:9")],
+            [fmt_btn("9:16"), fmt_btn("4:3")],
+            [fmt_btn("3:4"), fmt_btn("21:9")],
+            ["Назад"]
+        ],
+        resize_keyboard=True
     )
 
-def rating_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Супер", callback_data="rate_good"),
-            InlineKeyboardButton("Норм", callback_data="rate_mid"),
-            InlineKeyboardButton("Плохо", callback_data="rate_bad")
-        ]
-    ])
+
 
 def improve_keyboard(is_on: bool) -> ReplyKeyboardMarkup:
     status = "ВКЛ" if is_on else "ВЫКЛ"
@@ -612,26 +635,92 @@ async def cmd_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if context.args:
         prompt = ' '.join(context.args)
-        pending[user.id] = prompt
-        user_states[user.id] = "WAIT_FORMAT"
-        await ask_format(update, prompt)
+        # Immediate generation with saved settings
+        await start_generation(update, context, prompt, user.id)
         return
 
     user_states[user.id] = "WAIT_PROMPT"
+    
+    # Get current settings for display
+    fmt = get_user_aspect_ratio(user.id)
+    res = get_user_resolution(user.id)
+    
     text = (
         "<b>Что будем рисовать?</b>\n\n"
+        f"⚙️ <i>Текущие настройки: {fmt} | {res.upper()}</i>\n\n"
         "Опиши картинку как можно подробнее.\n"
         "<i>Пример: Киберпанк город, дождь, неон, 8k</i>"
     )
     cancel_kb = ReplyKeyboardMarkup([["Назад"]], resize_keyboard=True, one_time_keyboard=True)
     await update.message.reply_text(text, parse_mode='HTML', reply_markup=cancel_kb)
 
-async def ask_format(update: Update, prompt: str):
-    await update.message.reply_text(
-        "<b>Выбери формат:</b>",
-        reply_markup=format_keyboard(),
-        parse_mode='HTML'
+async def start_generation(update: Update, context: ContextTypes.DEFAULT_TYPE, prompt: str, user_id: int):
+    # Retrieve settings
+    aspect = get_user_aspect_ratio(user_id)
+    resolution = get_user_resolution(user_id)
+    use_boost = get_user_boost(user_id)
+    
+    msg = await update.message.reply_text(
+        f"<b>Генерация...</b>\n<i>Формат: {aspect} | Разрешение: {resolution.upper()}</i>",
+        reply_markup=main_menu_keyboard(),
+        parse_mode=ParseMode.HTML
     )
+    
+    used_improve = False
+    if use_boost:
+        # Boost logic here (if applicable)
+        # boosted = await improve_prompt(prompt, user_id)
+        # if boosted: prompt = boosted
+        pass
+    
+    animation = asyncio.create_task(animate(msg, aspect, resolution))
+    
+    try:
+        result, text_resp = await generate(prompt, aspect, user_id)
+    finally:
+        animation.cancel()
+    
+    if result == "no_balance":
+        await send_error_sticker(context, user_id)
+        try:
+            await safe_edit_text(msg, "<b>Ошибка:</b> Закончился баланс на сервере", parse_mode='HTML')
+        except:
+            await update.message.reply_text("Закончился баланс на сервере", reply_markup=main_menu_keyboard())
+    elif result == "server_down":
+        await send_error_sticker(context, user_id)
+        try:
+            await safe_edit_text(msg,
+                "<b>Сервер не отвечает</b>\n\n"
+                "Мы попробовали 2 раза, но сервер генерации лёг.\n"
+                "Это не наша проблема - подождите немного и попробуйте снова.",
+                parse_mode='HTML'
+            )
+        except:
+            pass
+        await update.message.reply_text("Попробуйте позже", reply_markup=main_menu_keyboard())
+    elif result == "white_screen":
+        await send_error_sticker(context, user_id)
+        try:
+            await safe_edit_text(msg, "<b>Ошибка доступа (White Screen)</b>\n\nСервер вернул HTML страницу вместо данных (возможно Cloudflare). Попробуйте позже.", parse_mode=ParseMode.HTML)
+        except:
+            await update.message.reply_text("Ошибка доступа (White Screen)", reply_markup=main_menu_keyboard())
+    elif result:
+        await send_result(context, user_id, result, msg, update.message.message_id)
+    else:
+        await send_error_sticker(context, user_id)
+        if text_resp:
+            cleaned_text = text_resp.replace('**', '').replace('\n\n', '\n')
+            if len(cleaned_text) > 800:
+                cleaned_text = cleaned_text[:800] + "..."
+            try:
+                await safe_edit_text(msg, f"<b>Не удалось сгенерировать.</b>\n\nОтвет нейросети:\n{html.escape(cleaned_text)}", parse_mode='HTML')
+            except:
+                await update.message.reply_text("Не удалось сгенерировать", reply_markup=main_menu_keyboard())
+        else:
+            try:
+                await safe_edit_text(msg, "<b>Не удалось сгенерировать.</b> Попробуйте снова.", parse_mode='HTML')
+            except:
+                await update.message.reply_text("Не удалось сгенерировать", reply_markup=main_menu_keyboard())
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_old_message(update):
@@ -655,14 +744,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     elif text == "Помощь":
         await cmd_help(update, context)
-        return
-    elif text == "Разрешение":
-        current = get_user_resolution(user.id)
-        await update.message.reply_text(
-            f"<b>Текущее: {current.upper()}</b>",
-            parse_mode='HTML',
-            reply_markup=resolution_keyboard(current)
-        )
         return
     elif text == "Improve Prompt":
         is_on = get_user_boost(user.id)
@@ -697,24 +778,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if text.startswith("/"):
             return
-        if text in FORMATS:
-            return
-        pending[user.id] = text
-        user_states[user.id] = "WAIT_FORMAT"
-        await ask_format(update, text)
-        return
-    
-    if state == "WAIT_FORMAT":
-        if text == "Назад":
-            user_states[user.id] = None
-            pending.pop(user.id, None)
-            await send_cancel_sticker(update, context)
-            await update.message.reply_text("Отменено", reply_markup=main_menu_keyboard())
-            return
-        if text in FORMATS:
-            user_states[user.id] = None
-            await on_format(update, context)
-            return
+        
+        # User entered prompt -> Generate immediately
+        user_states[user.id] = None
+        await start_generation(update, context, text, user.id)
         return
 
     if state == "WAIT_FEEDBACK":
@@ -735,153 +802,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_states[user.id] = None
         return
 
+    # Handle Settings Submenu
+    if text == "Настройки":
+        await update.message.reply_text("⚙️ <b>Настройки генерации</b>", parse_mode='HTML', reply_markup=settings_keyboard())
+        return
+        
+    if text == "Формат":
+        current = get_user_aspect_ratio(user.id)
+        await update.message.reply_text(
+            f"<b>Выберите формат (Aspect Ratio)</b>\nТекущий: {current}", 
+            parse_mode='HTML', 
+            reply_markup=format_keyboard(current)
+        )
+        return
+
+    if text == "Разрешение":
+        current = get_user_resolution(user.id)
+        await update.message.reply_text(
+            f"<b>Выберите разрешение</b>\nТекущее: {current.upper()}",
+            parse_mode='HTML',
+            reply_markup=resolution_keyboard(current)
+        )
+        return
+
+    # Handle Format Selection
     clean_text = text.replace("[x] ", "")
+    if clean_text in FORMATS:
+        set_user_aspect_ratio(user.id, clean_text)
+        await update.message.reply_text(f"✅ Формат установлен: <b>{clean_text}</b>", parse_mode='HTML', reply_markup=settings_keyboard())
+        return
+
+    # Handle Resolution Selection
     if clean_text in RESOLUTIONS:
         res = clean_text.lower()
         set_user_resolution(user.id, res)
         logger.info(f"[User {user.id}] Set resolution: {res.upper()}")
         await update.message.reply_text(
-            f"Разрешение: <b>{res.upper()}</b>",
+            f"✅ Разрешение установлено: <b>{res.upper()}</b>",
             parse_mode='HTML',
-            reply_markup=main_menu_keyboard()
+            reply_markup=settings_keyboard()
         )
         return
     
     if text == "Назад":
+        # Always return to main menu
         await send_cancel_sticker(update, context)
-        await update.message.reply_text("Отменено", reply_markup=main_menu_keyboard())
+        await update.message.reply_text("Главное меню", reply_markup=main_menu_keyboard())
         return
 
-async def on_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_old_message(update):
-        return
-    user = update.effective_user
-    text = update.message.text
-    
-    logger.info(f"[User {user.id}] Format: {text}")
-    
-    if text == "Назад":
-        pending.pop(user.id, None)
-        await send_cancel_sticker(update, context)
-        await update.message.reply_text("Отменено", reply_markup=main_menu_keyboard())
-        return
-    
-    prompt = pending.pop(user.id, None)
-    if not prompt:
-        await send_error_sticker(context, user.id)
-        await update.message.reply_text("Ошибка. Начните заново через меню.", reply_markup=main_menu_keyboard())
-        return
-    
-    aspect = text.lower()
-    resolution = get_user_resolution(user.id)
-    use_boost = get_user_boost(user.id)
-    
-    msg = await update.message.reply_text(
-        f"<b>Генерация...</b>\n<i>Формат: {aspect} | Разрешение: {resolution.upper()}</i>",
-        reply_markup=ReplyKeyboardRemove(),
-        parse_mode=ParseMode.HTML
-    )
-    
-    used_improve = False
-    if use_boost:
-        boosted = await improve_prompt(prompt, user.id)
-        if boosted:
-            prompt = boosted
-            used_improve = True
-    
-    animation = asyncio.create_task(animate(msg, aspect, resolution))
-    
-    try:
-        result, text_resp = await generate(prompt, aspect, user.id)
-    finally:
-        animation.cancel()
-    
-    if result == "no_balance":
-        await send_error_sticker(context, user.id)
-        try:
-            await safe_edit_text(msg, "<b>Ошибка:</b> Закончился баланс на сервере", parse_mode='HTML')
-        except:
-            await update.message.reply_text("Закончился баланс на сервере", reply_markup=main_menu_keyboard())
-    elif result == "server_down":
-        await send_error_sticker(context, user.id)
-        try:
-            await safe_edit_text(msg,
-                "<b>Сервер не отвечает</b>\n\n"
-                "Мы попробовали 2 раза, но сервер генерации лёг.\n"
-                "Это не наша проблема - подождите немного и попробуйте снова.",
-                parse_mode='HTML'
-            )
-        except:
-            pass
-        await update.message.reply_text("Попробуйте позже", reply_markup=main_menu_keyboard())
-    elif result == "white_screen":
-        await send_error_sticker(context, user.id)
-        try:
-            await safe_edit_text(msg, "<b>Ошибка доступа (White Screen)</b>\n\nСервер вернул HTML страницу вместо данных (возможно Cloudflare). Попробуйте позже.", parse_mode=ParseMode.HTML)
-        except:
-            await update.message.reply_text("Ошибка доступа (White Screen)", reply_markup=main_menu_keyboard())
-    elif result:
-        try:
-            # result is now bytes
-            image_data = result
-            size_mb = len(image_data) / (1024 * 1024)
-            
-            # Send as photo (preview)
-            bio_photo = io.BytesIO(image_data)
-            bio_photo.name = "image.png"
-            
-            await context.bot.send_photo(
-                chat_id=user.id, 
-                photo=bio_photo,
-                caption=f"<b>Готово!</b> ({size_mb:.1f} MB)", 
-                parse_mode=ParseMode.HTML,
-                reply_markup=rating_keyboard()
-            )
-            
-            # Send as document (no compression)
-            bio_doc = io.BytesIO(image_data)
-            bio_doc.name = "bananchik.png"
-            
-            await context.bot.send_document(
-                chat_id=user.id, 
-                document=bio_doc,
-                caption="Оригинал без сжатия",
-                reply_markup=main_menu_keyboard()
-            )
-            
-            try:
-                await msg.delete()
-            except:
-                pass
-            
-        except Exception as e:
-            logger.error(f"Send error: {e}")
-            await send_error_sticker(context, user.id)
-            try:
-                await safe_edit_text(msg, "<b>Ошибка</b> при отправке", parse_mode='HTML')
-            except:
-                await update.message.reply_text("Ошибка при отправке", reply_markup=main_menu_keyboard())
-    else:
-        await send_error_sticker(context, user.id)
-        if text_resp:
-            cleaned_text = text_resp.replace('**', '').replace('\n\n', '\n')
-            if len(cleaned_text) > 800:
-                cleaned_text = cleaned_text[:800] + "..."
-            try:
-                await safe_edit_text(msg, f"<b>Не удалось сгенерировать.</b>\n\nОтвет нейросети:\n{html.escape(cleaned_text)}", parse_mode='HTML')
-            except:
-                await update.message.reply_text("Не удалось сгенерировать", reply_markup=main_menu_keyboard())
-        else:
-            try:
-                await safe_edit_text(msg, "<b>Не удалось сгенерировать.</b> Попробуйте снова.", parse_mode='HTML')
-            except:
-                await update.message.reply_text("Не удалось сгенерировать", reply_markup=main_menu_keyboard())
 
-async def on_rating(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if is_old_message(update):
-        return
-    query = update.callback_query
-    await query.answer("Спасибо за оценку!")
+
+
+
 
 async def animate(msg, fmt: str, resolution: str = "1k"):
     dots = ["", ".", "..", "..."]
@@ -922,13 +894,13 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     photo = message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     photo_bytes = bytes(await file.download_as_bytearray())
-    aspect = detect_aspect_ratio(photo_bytes)
+    aspect = await detect_aspect_ratio(photo_bytes)
     
     msg = await message.reply_text(
         f"<b>Генерация по описанию...</b>\n<i>Формат: {aspect}</i>\n\n"
         "⚠️ Image-to-Image временно недоступен, использую текст",
         parse_mode=ParseMode.HTML,
-        reply_markup=ReplyKeyboardRemove()
+        reply_markup=main_menu_keyboard()
     )
     
     animation = asyncio.create_task(animate(msg, aspect))
@@ -1003,8 +975,19 @@ async def handle_reply_photo(update: Update, context: ContextTypes.DEFAULT_TYPE,
     
     return True
 
-async def send_result(context, user_id: int, result, msg):
-    """Send result image. result can be bytes or base64 string."""
+
+async def send_result(context, user_id: int, result, msg, original_msg_id: int = None):
+    """
+    Send result image. result can be bytes or base64 string.
+    Replies to original_msg_id if possible.
+    """
+    
+    UPDATE_TEXT = (
+        "\n\n📢 <b>БОТ ОБНОВЛЯЕТСЯ!</b>\n"
+        "Подождите чуть-чуть, мы внедряем новые модели, функции и исправляем баги.\n"
+        "Наше сообщество: t.me/Geometry90"
+    )
+
     try:
         # Handle both bytes and base64 string
         if isinstance(result, bytes):
@@ -1014,31 +997,54 @@ async def send_result(context, user_id: int, result, msg):
         
         size_mb = len(image_data) / (1024 * 1024)
         
-        if size_mb >= 10:
-            preview_data = compress_for_preview(image_data)
+        if size_mb >= 4:
+            preview_data = await compress_for_preview(image_data)
         else:
             preview_data = image_data
         
         bio_photo = io.BytesIO(preview_data)
         bio_photo.name = "preview.jpg"
         
-        await context.bot.send_photo(
-            chat_id=user_id, 
-            photo=bio_photo, 
-            caption="<b>Результат</b>", 
-            parse_mode='HTML',
-            reply_markup=rating_keyboard()
-        )
+        try:
+            await context.bot.send_photo(
+                chat_id=user_id, 
+                photo=bio_photo, 
+                caption=f"<b>Результат</b>{UPDATE_TEXT}", 
+                parse_mode='HTML',
+                reply_to_message_id=original_msg_id
+            )
+        except Exception as e:
+            logger.warning(f"Preview send failed: {e}")
+            # If reply fails (e.g. msg deleted), try sending without reply
+            try:
+                await context.bot.send_photo(
+                    chat_id=user_id, 
+                    photo=bio_photo, 
+                    caption=f"<b>Результат</b>{UPDATE_TEXT}", 
+                    parse_mode='HTML'
+                )
+            except Exception as e2:
+                 logger.error(f"Fallback send failed: {e2}")
+                 await context.bot.send_message(chat_id=user_id, text="⚠️ Ошибка отправки превью.")
 
         bio_doc = io.BytesIO(image_data)
         bio_doc.name = "bananchik_4k.png" if size_mb >= 10 else "bananchik.png"
         
-        await context.bot.send_document(
-            chat_id=user_id, 
-            document=bio_doc, 
-            caption=f"Оригинал ({size_mb:.1f} MB)",
-            reply_markup=main_menu_keyboard()
-        )
+        try:
+            await context.bot.send_document(
+                chat_id=user_id, 
+                document=bio_doc, 
+                caption=f"Оригинал ({size_mb:.1f} MB)",
+                reply_markup=main_menu_keyboard(),
+                reply_to_message_id=original_msg_id
+            )
+        except:
+             await context.bot.send_document(
+                chat_id=user_id, 
+                document=bio_doc, 
+                caption=f"Оригинал ({size_mb:.1f} MB)",
+                reply_markup=main_menu_keyboard()
+            )
         
         try:
             await msg.delete()
@@ -1049,14 +1055,12 @@ async def send_result(context, user_id: int, result, msg):
             
     except Exception as e:
         logger.error(f"Send result error: {e}")
-        # await context.bot.send_sticker(chat_id=user_id, sticker=STICKER_ERROR)
         await safe_edit_text(msg, "Ошибка отправки")
 
-def main():
-    global BOT_START_TIME
-    BOT_START_TIME = time.time()
-    
-    # Account Manager loads everything from user_accounts.json
+async def post_init(application: Application):
+    """
+    Initial check for accounts and startup tasks.
+    """
     from account_manager import get_manager
     manager = get_manager()
     stats = manager.get_stats()
@@ -1066,59 +1070,34 @@ def main():
     logger.info(f"📊 Users: {stats['users_assigned']} | Accounts: {stats['total_accounts']} (with quota: {stats['accounts_with_quota']})")
     logger.info(f"💎 Total premium: {stats['total_premium_quota']}")
     
-    # If pool is empty or low, start background account creation
+    # Check pool on startup
     MIN_ACCOUNTS = 5
     active_accounts = stats['accounts_with_quota']
     
     if active_accounts < MIN_ACCOUNTS:
         need = MIN_ACCOUNTS - active_accounts
-        logger.info(f"🔄 Pool low! Will create {need} accounts in background...")
-        
-        # Background account creation function
-        def create_accounts_background():
-            import subprocess
-            for i in range(need):
-                logger.info(f"🔄 Background: Creating account {i+1}/{need}...")
-                try:
-                    result = subprocess.run(
-                        ["python", "notegpt_auth.py"],
-                        capture_output=True,
-                        text=True,
-                        timeout=300
-                    )
-                    if result.returncode == 0:
-                        logger.info(f"✅ Background: Account {i+1} created!")
-                        # Reload manager
-                        manager.load()
-                    else:
-                        logger.error(f"❌ Background: Account {i+1} failed")
-                except Exception as e:
-                    logger.error(f"❌ Background error: {e}")
-            
-            stats = manager.get_stats()
-            logger.info(f"📊 Background done! Now: {stats['total_accounts']} accounts")
-        
-        # Start in background thread
-        import threading
-        thread = threading.Thread(target=create_accounts_background, daemon=True)
-        thread.start()
-    
-    logger.info("=" * 40)
+        logger.info(f"🔄 Pool low! Starting background creation for {need} accounts...")
+        for _ in range(need):
+            asyncio.create_task(manager.auto_create_account())
+
+def main():
+    global BOT_START_TIME
+    BOT_START_TIME = time.time()
     
     trequest = HTTPXRequest(connection_pool_size=100, connect_timeout=30.0, read_timeout=30.0)
     
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(256).request(trequest).build()
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(256).request(trequest).post_init(post_init).build()
     
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("g", cmd_generate))
     app.add_handler(CommandHandler("feedback", cmd_feedback))
     app.add_handler(CommandHandler("stats", cmd_stats))
-    app.add_handler(CallbackQueryHandler(on_rating, pattern="^rate_"))
+    # app.add_handler(CallbackQueryHandler(on_rating, pattern="^rate_"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot ready!")
+    logger.info("Bot configured and ready to poll!")
     app.run_polling()
 
 if __name__ == '__main__':
