@@ -177,6 +177,16 @@ class AccountManager:
             self.users[key] = {}
         self.users[key]["boost"] = boost
         self.save()
+
+    def get_user_aspect_ratio(self, user_id: int) -> str:
+        return self.users.get(str(user_id), {}).get("aspect_ratio", "1:1")
+
+    def set_user_aspect_ratio(self, user_id: int, aspect_ratio: str):
+        key = str(user_id)
+        if key not in self.users:
+            self.users[key] = {}
+        self.users[key]["aspect_ratio"] = aspect_ratio
+        self.save()
     
     def get_stats(self) -> dict:
         total = len(self.accounts)
